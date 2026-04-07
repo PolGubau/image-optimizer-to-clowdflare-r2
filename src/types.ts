@@ -9,7 +9,16 @@ export type SizeSuffix = "thumb" | "medium" | "large";
 
 export type Gps = { lat: number; lng: number; alt?: number };
 export type Camera = { make: string; model: string };
-export type Exposure = { aperture: number; shutter: string; iso: number };
+export type ExposureMode = "auto" | "manual";
+
+export type Exposure = {
+	aperture: number;
+	shutter: string;
+	iso: number;
+	focalLength?: number;    // mm — distancia focal real
+	flash?: boolean;         // true si disparó el flash
+	mode?: ExposureMode;     // auto | manual
+};
 
 export type PhotoMeta = {
 	takenAt: string | null;

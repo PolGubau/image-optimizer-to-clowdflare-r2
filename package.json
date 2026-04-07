@@ -5,6 +5,7 @@
 	"main": "index.js",
 	"scripts": {
 		"process:new": "tsx src/process-album.ts",
+		"process:json": "tsx src/process-album.ts",
 		"process-albums": "tsx src/process-all.ts",
 		"validate": "tsx src/validate-album.ts",
 		"export-labels": "tsx src/export-labels.ts",
@@ -14,7 +15,7 @@
 		"build": "tsc"
 	},
 	"keywords": [],
-	"author": "",
+	"author": "Pol Gubau Amores",
 	"license": "ISC",
 	"type": "commonjs",
 	"dependencies": {

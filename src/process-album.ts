@@ -36,6 +36,7 @@ import sharp from "sharp";
 
 const ALBUM = process.argv[2] ?? "granada";
 const FORCE_FILE = process.argv[3] ?? null; // fuerza reprocesar un archivo concreto
+const JSON_ONLY = process.argv.includes("--json-only"); // solo regenera el JSON, no toca imágenes
 const INPUT_DIR = `./input/${ALBUM}`;
 const OUTPUT_DIR = `./output/${ALBUM}`;
 const CONCURRENCY = 4;
@@ -264,6 +265,7 @@ const extractMeta = async (file: string): Promise<PhotoMeta> => {
 				pick: [
 					"DateTimeOriginal",
 					"CreateDate",
+					"OffsetTimeOriginal",
 					"GPSAltitude",
 					"Make",
 					"Model",
@@ -271,6 +273,9 @@ const extractMeta = async (file: string): Promise<PhotoMeta> => {
 					"FNumber",
 					"ExposureTime",
 					"ISO",
+					"FocalLength",
+					"Flash",
+					"ExposureMode",
 				],
 			})
 			.catch(() => null) as Promise<Record<string, unknown> | null>,
@@ -281,10 +286,15 @@ const extractMeta = async (file: string): Promise<PhotoMeta> => {
 	]);
 
 	// Fecha ───────────────────────────────────────────────────────────────────
-	// EXIF no guarda timezone → formateamos con getters locales (hora del móvil)
-	// sin sufijo Z para no implicar UTC. Ej: "2026-04-04T07:57:23"
+	// Si el EXIF incluye OffsetTimeOriginal (ej. "+02:00") usamos ISO 8601 completo.
+	// Si no, guardamos hora local sin sufijo para no implicar UTC.
 	const exifDate = exif?.DateTimeOriginal ?? exif?.CreateDate;
-	const takenAt = exifDate instanceof Date ? formatLocalDate(exifDate) : null;
+	const tzOffset = exif?.OffsetTimeOriginal as string | undefined;
+	const takenAt = exifDate instanceof Date
+		? tzOffset
+			? `${formatLocalDate(exifDate)}${tzOffset}`   // "2026-04-04T09:57:23+02:00"
+			: formatLocalDate(exifDate)                    // "2026-04-04T09:57:23"
+		: null;
 
 	// GPS — exifr.gps() ya devuelve decimales ─────────────────────────────────
 	let gps: Gps | undefined;
@@ -311,9 +321,29 @@ const extractMeta = async (file: string): Promise<PhotoMeta> => {
 	const aperture = exif?.FNumber as number | undefined;
 	const exposureTime = exif?.ExposureTime as number | undefined;
 	const iso = exif?.ISO as number | undefined;
+	const focalLength = exif?.FocalLength as number | undefined;
+	// Flash: exifr devuelve una cadena tipo "Flash did not fire..." — parseamos si disparó
+	const flashRaw = exif?.Flash as string | undefined;
+	const flash = flashRaw !== undefined
+		? /fired|yes/i.test(flashRaw)
+		: undefined;
+	// ExposureMode: 0 = Auto, 1 = Manual, 2 = Auto bracket
+	const exposureModeRaw = exif?.ExposureMode as number | string | undefined;
+	const mode: import("./types.js").ExposureMode | undefined =
+		exposureModeRaw === 1 || exposureModeRaw === "Manual" ? "manual"
+		: exposureModeRaw === 0 || exposureModeRaw === "Auto" ? "auto"
+		: undefined;
+
 	const exposure: Exposure | undefined =
 		aperture !== undefined && exposureTime !== undefined && iso !== undefined
-			? { aperture, shutter: formatShutter(exposureTime), iso }
+			? {
+				aperture,
+				shutter: formatShutter(exposureTime),
+				iso,
+				...(focalLength !== undefined ? { focalLength: Number(focalLength.toFixed(2)) } : {}),
+				...(flash !== undefined ? { flash } : {}),
+				...(mode !== undefined ? { mode } : {}),
+			}
 			: undefined;
 
 	return { takenAt, gps, camera, lens, exposure };
@@ -408,10 +438,63 @@ const processImage = async (
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
+/** Modo rápido: aplica labels.json y cover.txt sobre el album.json existente sin reencoder. */
+const rebuildJsonOnly = async () => {
+	const jsonPath = path.join(OUTPUT_DIR, "album.json");
+	let existing: Album;
+	try {
+		existing = JSON.parse(await fs.readFile(jsonPath, "utf8")) as Album;
+	} catch {
+		console.error(`❌  No existe ${jsonPath} — ejecuta primero pnpm process:new ${ALBUM}`);
+		process.exit(1);
+	}
+
+	const [labels, geoCache, coverFilename] = await Promise.all([
+		readLabels(ALBUM),
+		readGeoCache(ALBUM),
+		readCover(ALBUM),
+	]);
+
+	const photos: Photo[] = existing.photos.map((photo) => {
+		const gps = photo.meta.gps;
+		const autoLabel = gps ? (geoCache[geoKey(gps.lat, gps.lng)] ?? null) : null;
+		return {
+			...photo,
+			label: labels[photo.filename] ?? autoLabel ?? photo.label,
+			nav: {}, // se rellena abajo
+		};
+	});
+
+	photos.forEach((photo, i) => {
+		photo.nav.prev = i > 0 ? photos[i - 1].id : undefined;
+		photo.nav.next = i < photos.length - 1 ? photos[i + 1].id : undefined;
+	});
+
+	const cover = photos.find((p) => p.filename === coverFilename) ?? photos[0];
+
+	const album: Album = { ...existing, photos, cover: cover.id, coverBlurHash: cover.blurHash };
+	await fs.writeFile(jsonPath, toJSON(album));
+
+	await updateIndex({
+		id: ALBUM,
+		title: album.title,
+		count: album.count,
+		duration: album.duration,
+		cover: cover.id,
+		coverThumb: cover.sizes.thumb,
+		coverBlurHash: cover.blurHash,
+	});
+
+	console.log(`✅  album.json actualizado (solo JSON) → ${jsonPath}`);
+	console.log(`🗂️  output/index.json actualizado`);
+};
+
 const main = async () => {
 	console.log(`📂  Álbum: ${ALBUM}`);
 	console.log(`📥  Input:  ${INPUT_DIR}`);
 	console.log(`📤  Output: ${OUTPUT_DIR}\n`);
+
+	if (JSON_ONLY) return rebuildJsonOnly();
 
 	await fs.mkdir(OUTPUT_DIR, { recursive: true });
 
