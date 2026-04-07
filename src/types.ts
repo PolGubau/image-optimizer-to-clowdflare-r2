@@ -60,6 +60,8 @@ export type Album = {
 export type AlbumSummary = {
 	id: string;
 	title: string;
+	count: number;
+	duration: string | null;
 	cover: string;
 	coverThumb: string;
 	coverBlurHash: string | null;

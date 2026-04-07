@@ -41,9 +41,9 @@ const OUTPUT_DIR = `./output/${ALBUM}`;
 const CONCURRENCY = 4;
 
 const SIZES = [
-	{ suffix: "thumb",  width: 400,  quality: 65 }, // grids / thumbnails
+	{ suffix: "thumb",  width: 400,  quality: 55 }, // grids / thumbnails — nadie las mira en detalle
 	{ suffix: "medium", width: 900,  quality: 70 }, // mobile / lightbox preview
-	{ suffix: "large",  width: 1800, quality: 75 }, // desktop full-view
+	{ suffix: "large",  width: 1800, quality: 80 }, // desktop full-view — aquí importa la calidad
 ] as const;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -416,7 +416,7 @@ const main = async () => {
 	await fs.mkdir(OUTPUT_DIR, { recursive: true });
 
 	const [files, labels, geoCache, coverFilename] = await Promise.all([
-		glob(`${INPUT_DIR}/**/*.{jpg,jpeg,png,JPG,JPEG,PNG}`),
+		glob(`${INPUT_DIR}/**/*.{jpg,jpeg,png,heic,heif,JPG,JPEG,PNG,HEIC,HEIF}`),
 		readLabels(ALBUM),
 		readGeoCache(ALBUM),
 		readCover(ALBUM),
@@ -531,6 +531,8 @@ const main = async () => {
 	await updateIndex({
 		id: ALBUM,
 		title: album.title,
+		count: album.count,
+		duration: album.duration,
 		cover: cover.id,
 		coverThumb: cover.sizes.thumb,
 		coverBlurHash: cover.blurHash,

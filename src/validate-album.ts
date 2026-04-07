@@ -11,17 +11,10 @@
 
 import fs from "fs/promises";
 import path from "path";
+import type { Album } from "./types.js";
 
 const ALBUM = process.argv[2] ?? "granada";
 const OUTPUT_DIR = `./output/${ALBUM}`;
-
-type SizeSuffix = "thumb" | "medium" | "large";
-type Photo = {
-	id: string;
-	filename: string;
-	sizes: Record<SizeSuffix, string>;
-};
-type Album = { id: string; count: number; photos: Photo[] };
 
 const main = async () => {
 	const jsonPath = path.join(OUTPUT_DIR, "album.json");
@@ -38,23 +31,58 @@ const main = async () => {
 	console.log(`🔍  Validando álbum "${album.id}" (${album.count} fotos)\n`);
 
 	const errors: string[] = [];
+	const warnings: string[] = [];
 
+	// 1. count vs photos.length
+	if (album.count !== album.photos.length) {
+		errors.push(`  ✗  count=${album.count} pero hay ${album.photos.length} fotos en el array`);
+	}
+
+	// 2. Archivos de imagen referenciados
+	const checkedPaths = new Set<string>();
 	for (const photo of album.photos) {
 		for (const sizePath of Object.values(photo.sizes)) {
+			if (checkedPaths.has(sizePath)) continue; // tamaños reutilizados (foto pequeña)
+			checkedPaths.add(sizePath);
 			const fullPath = path.join(OUTPUT_DIR, path.basename(sizePath));
 			try {
 				await fs.access(fullPath);
 			} catch {
-				errors.push(`  ✗  ${photo.id} → ${sizePath}`);
+				errors.push(`  ✗  ${photo.id} → ${sizePath} (archivo no encontrado)`);
 			}
 		}
 	}
 
+	// 3. BlurHash nulo
+	const noBlur = album.photos.filter((p) => !p.blurHash);
+	if (noBlur.length > 0) {
+		warnings.push(`  ⚠  Sin blurHash: ${noBlur.map((p) => p.id).join(", ")}`);
+	}
+
+	// 4. takenAt ausente
+	const noDates = album.photos.filter((p) => !p.meta?.takenAt);
+	if (noDates.length > 0) {
+		warnings.push(`  ⚠  Sin takenAt (sin EXIF): ${noDates.map((p) => p.id).join(", ")}`);
+	}
+
+	// 5. Fotos sin GPS (informativo, no error)
+	const noGps = album.photos.filter((p) => !p.meta?.gps);
+	if (noGps.length > 0) {
+		warnings.push(`  ℹ  Sin GPS: ${noGps.map((p) => p.id).join(", ")}`);
+	}
+
+	// Resumen
+	if (warnings.length > 0) {
+		console.warn("⚠️   Advertencias:\n");
+		warnings.forEach((w) => console.warn(w));
+		console.log();
+	}
+
 	if (errors.length === 0) {
-		console.log(`✅  Todo correcto — ${album.count * 3} archivos verificados`);
-		console.log(`🚀  Listo para subir a R2`);
+		console.log(`✅  Todo correcto — ${checkedPaths.size} archivos verificados`);
+		if (warnings.length === 0) console.log(`🚀  Listo para subir a R2`);
 	} else {
-		console.error(`❌  Faltan ${errors.length} archivo(s):\n`);
+		console.error(`\n❌  ${errors.length} error(es):\n`);
 		errors.forEach((e) => console.error(e));
 		process.exit(1);
 	}
