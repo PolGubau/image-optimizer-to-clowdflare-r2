@@ -62,7 +62,7 @@ import type {
 } from "./types.js";
 
 /** Photo sin campos finales — se asignan en main tras ordenar */
-type PhotoDraft = Omit<Photo, "id" | "isCover" | "srcset" | "nav">;
+type PhotoDraft = Omit<Photo, "id" | "nav">;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -73,6 +73,16 @@ const exists = (p: string) =>
 		.catch(() => false);
 
 const bytesToKB = (n: number) => (n / 1024).toFixed(1);
+
+/** Formatea una fecha usando getters locales — preserva la hora del móvil sin asumir UTC. */
+const formatLocalDate = (d: Date): string => {
+	const p = (n: number) => String(n).padStart(2, "0");
+	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+};
+
+/** Omite campos null/undefined del JSON — menos bytes, menos ruido. */
+const toJSON = (value: unknown) =>
+	JSON.stringify(value, (_k, v) => (v === null || v === undefined ? undefined : v), 2);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -180,9 +190,9 @@ const readLabels = async (album: string): Promise<Record<string, string>> => {
 	}
 };
 
-// Cache de geocoding: input/<album>/geo-cache.json
+// Cache de geocoding: output/<album>/geo-cache.json (artefacto generado, no fuente)
 // Formato: { "37.175053,-3.599189": "Sagrario, Granada" }
-const geoCachePath = (album: string) => `./input/${album}/geo-cache.json`;
+const geoCachePath = (album: string) => `./output/${album}/geo-cache.json`;
 
 const readGeoCache = async (album: string): Promise<Record<string, string>> => {
 	try {
@@ -216,6 +226,36 @@ const readCover = async (album: string): Promise<string | null> => {
 	}
 };
 
+/** Color dominante de la foto para fondos y texto accesible. */
+const getPalette = async (file: string): Promise<Palette> => {
+	try {
+		const { data } = await sharp(file)
+			.resize(1, 1)
+			.removeAlpha()
+			.raw()
+			.toBuffer({ resolveWithObject: true });
+		const [r, g, b] = [data[0], data[1], data[2]];
+		const hex = (n: number) => n.toString(16).padStart(2, "0");
+		const bg = `#${hex(r)}${hex(g)}${hex(b)}`;
+		return { bg };
+	} catch {
+		return { bg: "#888888" };
+	}
+};
+
+
+/** Duración del álbum en lenguaje natural (días calendario, no horas). */
+const albumDuration = (from: string | null, to: string | null): string | null => {
+	if (!from || !to) return null;
+	const fromDay = from.split("T")[0];
+	const toDay = to.split("T")[0];
+	if (fromDay === toDay) return "1 día";
+	const days = Math.round(
+		(new Date(toDay).getTime() - new Date(fromDay).getTime()) / 86_400_000,
+	) + 1;
+	return `${days} días`;
+};
+
 /** Extrae metadata útil del archivo desde el EXIF nativo. */
 const extractMeta = async (file: string): Promise<PhotoMeta> => {
 	const [exif, gpsDecimal] = await Promise.all([
@@ -241,37 +281,40 @@ const extractMeta = async (file: string): Promise<PhotoMeta> => {
 	]);
 
 	// Fecha ───────────────────────────────────────────────────────────────────
+	// EXIF no guarda timezone → formateamos con getters locales (hora del móvil)
+	// sin sufijo Z para no implicar UTC. Ej: "2026-04-04T07:57:23"
 	const exifDate = exif?.DateTimeOriginal ?? exif?.CreateDate;
-	const takenAt = exifDate instanceof Date ? exifDate.toISOString() : null;
+	const takenAt = exifDate instanceof Date ? formatLocalDate(exifDate) : null;
 
 	// GPS — exifr.gps() ya devuelve decimales ─────────────────────────────────
-	let gps: Gps | null = null;
+	let gps: Gps | undefined;
 	if (gpsDecimal && (gpsDecimal.latitude !== 0 || gpsDecimal.longitude !== 0)) {
+		const rawAlt = exif?.GPSAltitude as number | undefined;
 		gps = {
 			lat: Number(gpsDecimal.latitude.toFixed(6)),
 			lng: Number(gpsDecimal.longitude.toFixed(6)),
-			...(exif?.GPSAltitude !== undefined && {
-				alt: Number((exif.GPSAltitude as number).toFixed(1)),
-			}),
+			...(rawAlt !== undefined && rawAlt !== 0
+				? { alt: Number(rawAlt.toFixed(1)) }
+				: {}),
 		};
 	}
 
 	// Cámara ──────────────────────────────────────────────────────────────────
-	const make = (exif?.Make as string | undefined)?.trim() ?? null;
-	const model = (exif?.Model as string | undefined)?.trim() ?? null;
-	const camera: Camera | null = make && model ? { make, model } : null;
+	const make = (exif?.Make as string | undefined)?.trim();
+	const model = (exif?.Model as string | undefined)?.trim();
+	const camera: Camera | undefined = make && model ? { make, model } : undefined;
 
 	// Lente ───────────────────────────────────────────────────────────────────
-	const lens = (exif?.LensModel as string | undefined)?.trim() ?? null;
+	const lens = (exif?.LensModel as string | undefined)?.trim() || undefined;
 
 	// Exposición ──────────────────────────────────────────────────────────────
 	const aperture = exif?.FNumber as number | undefined;
 	const exposureTime = exif?.ExposureTime as number | undefined;
 	const iso = exif?.ISO as number | undefined;
-	const exposure: Exposure | null =
+	const exposure: Exposure | undefined =
 		aperture !== undefined && exposureTime !== undefined && iso !== undefined
 			? { aperture, shutter: formatShutter(exposureTime), iso }
-			: null;
+			: undefined;
 
 	return { takenAt, gps, camera, lens, exposure };
 };
@@ -291,8 +334,8 @@ const updateIndex = async (summary: AlbumSummary): Promise<void> => {
 	if (i >= 0) entries[i] = summary;
 	else entries.push(summary);
 
-	entries.sort((a, b) => (a.dateFrom ?? "").localeCompare(b.dateFrom ?? ""));
-	await fs.writeFile(indexPath, JSON.stringify(entries, null, 2));
+	entries.sort((a, b) => a.id.localeCompare(b.id));
+	await fs.writeFile(indexPath, toJSON(entries));
 };
 
 // ── Core ──────────────────────────────────────────────────────────────────────
@@ -342,21 +385,22 @@ const processImage = async (
 		outputBytes += info.size;
 	}
 
-	const [photoMeta, blurHash] = await Promise.all([
+	const [photoMeta, blurHash, palette] = await Promise.all([
 		extractMeta(file),
 		getBlurHash(file),
+		getPalette(file),
 	]);
 
 	stats.saved += originalStat.size - outputBytes;
 
 	return {
 		filename,
-		label: null,
+		label: undefined,
 		orientation: toOrientation(w, h),
 		blurHash,
+		palette,
 		width: w,
 		height: h,
-		aspectRatio: h > 0 ? Number.parseFloat((w / h).toFixed(4)) : 0,
 		sizes,
 		meta: photoMeta,
 	};
@@ -439,7 +483,7 @@ const main = async () => {
 		console.log("   ✓ Cache actualizado\n");
 	}
 
-	// Asignar id, isCover y label — manual > cache GPS > null
+	// Asignar id, label — manual > cache GPS > null
 	const photos: Photo[] = drafts.map((draft, i) => {
 		const gps = draft.meta.gps;
 		const autoLabel = gps ? (geoCache[geoKey(gps.lat, gps.lng)] ?? null) : null;
@@ -447,45 +491,49 @@ const main = async () => {
 			id: `${ALBUM}-${String(i + 1).padStart(3, "0")}`,
 			filename: draft.filename,
 			label: labels[draft.filename] ?? autoLabel,
-			isCover: coverFilename === draft.filename,
 			orientation: draft.orientation,
 			blurHash: draft.blurHash,
+			palette: draft.palette,
+			nav: {}, // se rellena abajo
 			width: draft.width,
 			height: draft.height,
-			aspectRatio: draft.aspectRatio,
 			sizes: draft.sizes,
 			meta: draft.meta,
 		};
 	});
 
-	const cover = photos.find((p) => p.isCover) ?? photos[0];
+	// Nav prev/next (undefined = primer/último — se omite en el JSON)
+	photos.forEach((photo, i) => {
+		photo.nav.prev = i > 0 ? photos[i - 1].id : undefined;
+		photo.nav.next = i < photos.length - 1 ? photos[i + 1].id : undefined;
+	});
 
-	const album = {
-		id: ALBUM,
-		title: ALBUM.charAt(0).toUpperCase() + ALBUM.slice(1),
-		count: photos.length,
-		cover: cover.id,
-		photos,
-	};
+	const cover = photos.find((p) => p.filename === coverFilename) ?? photos[0];
 
-	const jsonPath = path.join(OUTPUT_DIR, "album.json");
-	await fs.writeFile(jsonPath, JSON.stringify(album, null, 2));
-
-	// Actualizar índice global
 	const dates = photos
 		.map((p) => p.meta.takenAt)
 		.filter((d): d is string => d !== null)
 		.sort();
 
+	const album: Album = {
+		id: ALBUM,
+		title: ALBUM.charAt(0).toUpperCase() + ALBUM.slice(1),
+		count: photos.length,
+		duration: albumDuration(dates[0] ?? null, dates[dates.length - 1] ?? null),
+		cover: cover.id,
+		coverBlurHash: cover.blurHash,
+		photos,
+	};
+
+	const jsonPath = path.join(OUTPUT_DIR, "album.json");
+	await fs.writeFile(jsonPath, toJSON(album));
+
 	await updateIndex({
 		id: ALBUM,
 		title: album.title,
-		count: photos.length,
 		cover: cover.id,
 		coverThumb: cover.sizes.thumb,
-		dateFrom: dates[0] ?? null,
-		dateTo: dates[dates.length - 1] ?? null,
-		updatedAt: new Date().toISOString(),
+		coverBlurHash: cover.blurHash,
 	});
 
 	console.log(`✅  album.json generado → ${jsonPath}`);

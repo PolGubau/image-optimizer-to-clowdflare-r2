@@ -7,8 +7,8 @@
  * Uso: pnpm process-albums
  */
 
-import {readdir} from "fs/promises";
-import { execSync } from "child_process";
+import { readdir } from "fs/promises";
+import { spawnSync } from "child_process";
 
 const main = async () => {
 	let entries: string[] = [];
@@ -27,13 +27,28 @@ const main = async () => {
 
 	console.log(`🗂️  ${entries.length} álbumes encontrados: ${entries.join(", ")}\n`);
 
+	const failed: string[] = [];
+
 	for (const album of entries) {
 		console.log("─".repeat(50));
-		execSync(`npx tsx src/process-album.ts ${album}`, { stdio: "inherit" });
+		const result = spawnSync(
+			"npx", ["tsx", "src/process-album.ts", album],
+			{ stdio: "inherit", shell: true },
+		);
+		if (result.status !== 0) {
+			console.error(`\n❌  Falló: "${album}"`);
+			failed.push(album);
+		}
 	}
 
 	console.log("\n" + "─".repeat(50));
-	console.log(`✅  Todos los álbumes procesados`);
+	if (failed.length === 0) {
+		console.log(`✅  ${entries.length}/${entries.length} álbumes procesados`);
+	} else {
+		console.log(`⚠️   ${entries.length - failed.length}/${entries.length} álbumes procesados`);
+		console.error(`❌  Fallaron: ${failed.join(", ")}`);
+		process.exit(1);
+	}
 };
 
 main();

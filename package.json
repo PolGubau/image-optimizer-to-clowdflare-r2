@@ -7,9 +7,10 @@
 		"process:new": "tsx src/process-album.ts",
 		"process-albums": "tsx src/process-all.ts",
 		"validate": "tsx src/validate-album.ts",
+		"export-labels": "tsx src/export-labels.ts",
 		"storage": "tsx src/storage-report.ts",
 		"clear": "node -e \"require('fs').rmSync('output', { recursive: true, force: true })\"",
-		"process": "pnpm clear && pnpm process",
+		"process": "pnpm clear && pnpm process:new",
 		"build": "tsc"
 	},
 	"keywords": [],
