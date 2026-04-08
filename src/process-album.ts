@@ -26,23 +26,23 @@
 
 import os from "os";
 import path from "path";
+import { encode as blurhashEncode } from "blurhash";
 import exifr from "exifr";
 import fs from "fs/promises";
 import { glob } from "glob";
-import { encode as blurhashEncode } from "blurhash";
 import pLimit from "p-limit";
 import sharp from "sharp";
 import type {
-	SizeSuffix,
-	Gps,
+	Album,
+	AlbumSummary,
 	Camera,
 	Exposure,
-	PhotoMeta,
+	Gps,
 	Orientation,
 	Palette,
 	Photo,
-	Album,
-	AlbumSummary,
+	PhotoMeta,
+	SizeSuffix,
 } from "./types.js";
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -52,18 +52,18 @@ import type {
 const _positional = process.argv.slice(2).filter((a) => !a.startsWith("--"));
 const _flags = new Set(process.argv.slice(2).filter((a) => a.startsWith("--")));
 
-const ALBUM      = _positional[0] ?? "granada";
+const ALBUM = _positional[0] ?? "granada";
 const FORCE_FILE = _positional[1] ?? null; // fuerza reprocesar un archivo concreto
-const JSON_ONLY  = _flags.has("--json-only"); // solo regenera el JSON, no toca imágenes
+const JSON_ONLY = _flags.has("--json-only"); // solo regenera el JSON, no toca imágenes
 const INPUT_DIR = `./input/${ALBUM}`;
 const OUTPUT_DIR = `./output/${ALBUM}`;
 // Usar todos los cores menos uno para no bloquear el sistema durante el proceso
 const CONCURRENCY = Math.max(1, os.cpus().length - 1);
 
 const SIZES = [
-	{ suffix: "thumb",  width: 400,  quality: 55, effort: 2 }, // thumbnails — mínimo esfuerzo, se ven en grid
-	{ suffix: "medium", width: 900,  quality: 70, effort: 3 }, // mobile / lightbox preview
-	{ suffix: "large",  width: 1800, quality: 80, effort: 4 }, // desktop — calidad visible, effort razonable
+	{ suffix: "thumb", width: 400, quality: 55, effort: 2 }, // thumbnails — mínimo esfuerzo, se ven en grid
+	{ suffix: "medium", width: 900, quality: 70, effort: 3 }, // mobile / lightbox preview
+	{ suffix: "large", width: 1800, quality: 80, effort: 4 }, // desktop — calidad visible, effort razonable
 ] as const;
 
 /** Photo sin campos finales — se asignan en main tras ordenar */
@@ -102,7 +102,11 @@ const formatLocalDate = (d: Date): string => {
 
 /** Omite campos null/undefined del JSON — menos bytes, menos ruido. */
 const toJSON = (value: unknown) =>
-	JSON.stringify(value, (_k, v) => (v === null || v === undefined ? undefined : v), 2);
+	JSON.stringify(
+		value,
+		(_k, v) => (v === null || v === undefined ? undefined : v),
+		2,
+	);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -171,7 +175,6 @@ const formatShutter = (seconds: number): string => {
 	return `1/${denom}`;
 };
 
-
 // Umbral de 10px: diferencia mínima para no clasificar como "square"
 // fotos que son casi cuadradas por rotación o crop.
 const SQUARE_THRESHOLD = 10;
@@ -229,6 +232,22 @@ const readConfig = async (): Promise<{ cdnBase: string }> => {
 };
 
 /**
+ * Lee input/<album>/config.json si existe.
+ * Permite configurar el nombre de carpeta en R2 si difiere del nombre local.
+ * Ejemplo: álbum local "granada" → r2Folder "04-2027-Granada"
+ */
+const readAlbumConfig = async (
+	album: string,
+): Promise<{ r2Folder?: string }> => {
+	try {
+		const raw = await fs.readFile(`./input/${album}/config.json`, "utf8");
+		return JSON.parse(raw) as { r2Folder?: string };
+	} catch {
+		return {};
+	}
+};
+
+/**
  * Añade el cdnBase a los filenames de sizes para que el JSON tenga URLs absolutas.
  * Si cdnBase está vacío devuelve los filenames sin modificar (desarrollo local).
  */
@@ -280,7 +299,8 @@ const saveGeoCache = async (
 };
 
 // 3 decimales = ~110m de precisión — suficiente para geocoding, reduce API calls
-const geoKey = (lat: number, lng: number) => `${lat.toFixed(3)},${lng.toFixed(3)}`;
+const geoKey = (lat: number, lng: number) =>
+	`${lat.toFixed(3)},${lng.toFixed(3)}`;
 
 /**
  * Lee input/<album>/cover.txt si existe.
@@ -313,16 +333,19 @@ const getPalette = async (input: Buffer | string): Promise<Palette> => {
 	}
 };
 
-
 /** Duración del álbum en lenguaje natural (días calendario, no horas). */
-const albumDuration = (from: string | undefined, to: string | undefined): string | undefined => {
+const albumDuration = (
+	from: string | undefined,
+	to: string | undefined,
+): string | undefined => {
 	if (!from || !to) return undefined;
 	const fromDay = from.split("T")[0];
 	const toDay = to.split("T")[0];
 	if (fromDay === toDay) return "1 día";
-	const days = Math.round(
-		(new Date(toDay).getTime() - new Date(fromDay).getTime()) / 86_400_000,
-	) + 1;
+	const days =
+		Math.round(
+			(new Date(toDay).getTime() - new Date(fromDay).getTime()) / 86_400_000,
+		) + 1;
 	return `${days} días`;
 };
 
@@ -363,11 +386,12 @@ const extractMeta = async (buffer: Buffer): Promise<PhotoMeta> => {
 	// Si no, guardamos hora local sin sufijo para no implicar UTC.
 	const exifDate = exif?.DateTimeOriginal ?? exif?.CreateDate;
 	const tzOffset = exif?.OffsetTimeOriginal as string | undefined;
-	const takenAt = exifDate instanceof Date
-		? tzOffset
-			? `${formatLocalDate(exifDate)}${tzOffset}`   // "2026-04-04T09:57:23+02:00"
-			: formatLocalDate(exifDate)                    // "2026-04-04T09:57:23"
-		: undefined;
+	const takenAt =
+		exifDate instanceof Date
+			? tzOffset
+				? `${formatLocalDate(exifDate)}${tzOffset}` // "2026-04-04T09:57:23+02:00"
+				: formatLocalDate(exifDate) // "2026-04-04T09:57:23"
+			: undefined;
 
 	// GPS — exifr.gps() ya devuelve decimales ─────────────────────────────────
 	let gps: Gps | undefined;
@@ -385,7 +409,8 @@ const extractMeta = async (buffer: Buffer): Promise<PhotoMeta> => {
 	// Cámara ──────────────────────────────────────────────────────────────────
 	const make = (exif?.Make as string | undefined)?.trim();
 	const model = (exif?.Model as string | undefined)?.trim();
-	const camera: Camera | undefined = make && model ? { make, model } : undefined;
+	const camera: Camera | undefined =
+		make && model ? { make, model } : undefined;
 
 	// Lente ───────────────────────────────────────────────────────────────────
 	const lens = (exif?.LensModel as string | undefined)?.trim() || undefined;
@@ -397,26 +422,29 @@ const extractMeta = async (buffer: Buffer): Promise<PhotoMeta> => {
 	const focalLength = exif?.FocalLength as number | undefined;
 	// Flash: exifr devuelve una cadena tipo "Flash did not fire..." — parseamos si disparó
 	const flashRaw = exif?.Flash as string | undefined;
-	const flash = flashRaw !== undefined
-		? /fired|yes/i.test(flashRaw)
-		: undefined;
+	const flash =
+		flashRaw !== undefined ? /fired|yes/i.test(flashRaw) : undefined;
 	// ExposureMode: 0 = Auto, 1 = Manual, 2 = Auto bracket
 	const exposureModeRaw = exif?.ExposureMode as number | string | undefined;
 	const mode: import("./types.js").ExposureMode | undefined =
-		exposureModeRaw === 1 || exposureModeRaw === "Manual" ? "manual"
-		: exposureModeRaw === 0 || exposureModeRaw === "Auto" ? "auto"
-		: undefined;
+		exposureModeRaw === 1 || exposureModeRaw === "Manual"
+			? "manual"
+			: exposureModeRaw === 0 || exposureModeRaw === "Auto"
+				? "auto"
+				: undefined;
 
 	const exposure: Exposure | undefined =
 		aperture !== undefined && exposureTime !== undefined && iso !== undefined
 			? {
-				aperture,
-				shutter: formatShutter(exposureTime),
-				iso,
-				...(focalLength !== undefined ? { focalLength: Number(focalLength.toFixed(2)) } : {}),
-				...(flash !== undefined ? { flash } : {}),
-				...(mode !== undefined ? { mode } : {}),
-			}
+					aperture,
+					shutter: formatShutter(exposureTime),
+					iso,
+					...(focalLength !== undefined
+						? { focalLength: Number(focalLength.toFixed(2)) }
+						: {}),
+					...(flash !== undefined ? { flash } : {}),
+					...(mode !== undefined ? { mode } : {}),
+				}
 			: undefined;
 
 	return { takenAt, gps, camera, lens, exposure };
@@ -431,7 +459,9 @@ const updateIndex = async (summary: AlbumSummary): Promise<void> => {
 	try {
 		const raw = await fs.readFile(indexPath, "utf8");
 		entries = JSON.parse(raw) as AlbumSummary[];
-	} catch { /* primera vez */ }
+	} catch {
+		/* primera vez */
+	}
 
 	const i = entries.findIndex((e) => e.id === summary.id);
 	if (i >= 0) entries[i] = summary;
@@ -449,6 +479,7 @@ const processImage = async (
 	file: string,
 	existingPhotos: Map<string, Photo>,
 	oldCdnBase: string,
+	oldR2Folder: string,
 ): Promise<ImageResult> => {
 	const filename = path.basename(file, path.extname(file));
 
@@ -456,9 +487,12 @@ const processImage = async (
 	// reutilizamos todo sin leer el buffer ni recomputar EXIF/blurHash/palette
 	const thumbPath = path.join(OUTPUT_DIR, `${filename}_thumb.avif`);
 	const cached = existingPhotos.get(filename);
-	if (FORCE_FILE !== filename && cached && await exists(thumbPath)) {
+	if (FORCE_FILE !== filename && cached && (await exists(thumbPath))) {
 		const rawSizes = Object.fromEntries(
-			Object.entries(cached.sizes).map(([k, v]) => [k, stripCdn(v, oldCdnBase, ALBUM)]),
+			Object.entries(cached.sizes).map(([k, v]) => [
+				k,
+				stripCdn(v, oldCdnBase, oldR2Folder),
+			]),
 		) as Record<SizeSuffix, string>;
 		return {
 			draft: {
@@ -501,7 +535,7 @@ const processImage = async (
 		sizes[suffix] = `${filename}_${suffix}.avif`;
 		lastSuffix = suffix;
 
-		if (FORCE_FILE !== filename && await exists(outPath)) {
+		if (FORCE_FILE !== filename && (await exists(outPath))) {
 			outputBytes += (await fs.stat(outPath)).size;
 			continue;
 		}
@@ -547,33 +581,47 @@ const rebuildJsonOnly = async () => {
 	try {
 		existing = JSON.parse(await fs.readFile(jsonPath, "utf8")) as Album;
 	} catch {
-		console.error(`❌  No existe ${jsonPath} — ejecuta primero pnpm process:new ${ALBUM}`);
+		console.error(
+			`❌  No existe ${jsonPath} — ejecuta primero pnpm process:new ${ALBUM}`,
+		);
 		process.exit(1);
 	}
 
 	// Leer config viejo ANTES de sobrescribirlo — necesario para hacer strip+reapply
-	let oldConfig: { cdnBase: string } = { cdnBase: "" };
-	try { oldConfig = JSON.parse(await fs.readFile("./output/config.json", "utf8")); } catch { /* primera vez */ }
+	let oldConfig: { cdnBase: string; r2Folder?: string } = { cdnBase: "" };
+	try {
+		oldConfig = JSON.parse(await fs.readFile("./output/config.json", "utf8"));
+	} catch {
+		/* primera vez */
+	}
 
-	const [labels, geoCache, coverFilename, config] = await Promise.all([
-		readLabels(ALBUM),
-		readGeoCache(ALBUM),
-		readCover(ALBUM),
-		readConfig(),
-	]);
+	const [labels, geoCache, coverFilename, config, albumConfig] =
+		await Promise.all([
+			readLabels(ALBUM),
+			readGeoCache(ALBUM),
+			readCover(ALBUM),
+			readConfig(),
+			readAlbumConfig(ALBUM),
+		]);
 
-	await fs.writeFile("./output/config.json", toJSON(config));
+	const r2Folder = albumConfig.r2Folder ?? ALBUM;
+	const oldR2Folder = oldConfig.r2Folder ?? ALBUM;
+
+	await fs.writeFile("./output/config.json", toJSON({ ...config, r2Folder }));
 
 	const photos: Photo[] = existing.photos.map((photo) => {
 		const gps = photo.meta.gps;
 		const autoLabel = gps ? geoCache[geoKey(gps.lat, gps.lng)] : undefined;
 		// Strip cdnBase viejo → aplica el nuevo (soporta cambio de dominio sin reencoder)
 		const rawSizes = Object.fromEntries(
-			Object.entries(photo.sizes).map(([k, v]) => [k, stripCdn(v, oldConfig.cdnBase, ALBUM)]),
+			Object.entries(photo.sizes).map(([k, v]) => [
+				k,
+				stripCdn(v, oldConfig.cdnBase, oldR2Folder),
+			]),
 		) as Record<SizeSuffix, string>;
 		return {
 			...photo,
-			sizes: applyCdn(rawSizes, config.cdnBase, ALBUM),
+			sizes: applyCdn(rawSizes, config.cdnBase, r2Folder),
 			label: labels[photo.filename] ?? autoLabel ?? photo.label,
 			nav: {}, // se rellena abajo
 		};
@@ -586,7 +634,12 @@ const rebuildJsonOnly = async () => {
 
 	const cover = photos.find((p) => p.filename === coverFilename) ?? photos[0];
 
-	const album: Album = { ...existing, photos, cover: cover.id, coverBlurHash: cover.blurHash };
+	const album: Album = {
+		...existing,
+		photos,
+		cover: cover.id,
+		coverBlurHash: cover.blurHash,
+	};
 	await fs.writeFile(jsonPath, toJSON(album));
 
 	await updateIndex({
@@ -612,32 +665,45 @@ const main = async () => {
 
 	await fs.mkdir(OUTPUT_DIR, { recursive: true });
 
-	const [files, labels, geoCache, coverFilename, config] = await Promise.all([
-		glob(`${INPUT_DIR}/**/*.{jpg,jpeg,png,heic,heif,JPG,JPEG,PNG,HEIC,HEIF}`),
-		readLabels(ALBUM),
-		readGeoCache(ALBUM),
-		readCover(ALBUM),
-		readConfig(),
-	]);
+	const [files, labels, geoCache, coverFilename, config, albumConfig] =
+		await Promise.all([
+			glob(`${INPUT_DIR}/**/*.{jpg,jpeg,png,heic,heif,JPG,JPEG,PNG,HEIC,HEIF}`),
+			readLabels(ALBUM),
+			readGeoCache(ALBUM),
+			readCover(ALBUM),
+			readConfig(),
+			readAlbumConfig(ALBUM),
+		]);
+
+	const r2Folder = albumConfig.r2Folder ?? ALBUM;
 
 	// Leer config y album.json existentes ANTES de sobrescribirlos
 	// — necesario para early exit y strip+reapply de CDN
 	let oldCdnBase = "";
+	let oldR2Folder = ALBUM;
 	let existingPhotos = new Map<string, Photo>();
 	try {
 		const [oldConfigRaw, oldAlbumRaw] = await Promise.allSettled([
 			fs.readFile("./output/config.json", "utf8"),
 			fs.readFile(path.join(OUTPUT_DIR, "album.json"), "utf8"),
 		]);
-		if (oldConfigRaw.status === "fulfilled")
-			oldCdnBase = (JSON.parse(oldConfigRaw.value) as { cdnBase: string }).cdnBase;
+		if (oldConfigRaw.status === "fulfilled") {
+			const oldConfig = JSON.parse(oldConfigRaw.value) as {
+				cdnBase: string;
+				r2Folder?: string;
+			};
+			oldCdnBase = oldConfig.cdnBase;
+			oldR2Folder = oldConfig.r2Folder ?? ALBUM;
+		}
 		if (oldAlbumRaw.status === "fulfilled") {
 			const oldAlbum = JSON.parse(oldAlbumRaw.value) as Album;
 			existingPhotos = new Map(oldAlbum.photos.map((p) => [p.filename, p]));
 		}
-	} catch { /* primera pasada, no hay datos previos */ }
+	} catch {
+		/* primera pasada, no hay datos previos */
+	}
 
-	await fs.writeFile("./output/config.json", toJSON(config));
+	await fs.writeFile("./output/config.json", toJSON({ ...config, r2Folder }));
 
 	if (files.length === 0) {
 		console.error(`❌  No se encontraron imágenes en ${INPUT_DIR}`);
@@ -654,7 +720,9 @@ const main = async () => {
 		else seen.add(base);
 	}
 	if (dupes.size > 0) {
-		console.error(`❌  Nombres de archivo duplicados (causarían AVIFs idénticos):`);
+		console.error(
+			`❌  Nombres de archivo duplicados (causarían AVIFs idénticos):`,
+		);
 		for (const d of dupes) console.error(`   • ${d}`);
 		process.exit(1);
 	}
@@ -662,8 +730,7 @@ const main = async () => {
 	console.log(`🖼️   ${files.length} imágenes encontradas`);
 	if (Object.keys(labels).length > 0)
 		console.log(`🏷️   ${Object.keys(labels).length} labels cargados`);
-	if (FORCE_FILE)
-		console.log(`🔁  Forzando reprocesado de: ${FORCE_FILE}`);
+	if (FORCE_FILE) console.log(`🔁  Forzando reprocesado de: ${FORCE_FILE}`);
 	console.log();
 
 	const limit = pLimit(CONCURRENCY);
@@ -671,30 +738,40 @@ const main = async () => {
 	let processed = 0;
 	const startTime = Date.now();
 
-	const results = (await Promise.all(
-		files.map((file) =>
-			limit(async () => {
-				const result = await processImage(file, existingPhotos, oldCdnBase).catch((err: Error) => {
-					const name = path.basename(file);
-					process.stdout.write("\n");
-					console.warn(`⚠️  Error procesando ${name}: ${err.message}`);
-					failed.push(name);
-					return null;
-				});
-				processed++;
-				const elapsed = (Date.now() - startTime) / 1000;
-				const speed = processed / elapsed;
-				const eta = processed < files.length
-					? ` | ${speed.toFixed(1)} foto/s | ETA ~${formatETA((files.length - processed) / speed)}`
-					: "";
-				process.stdout.write(`\r   ${processed}/${files.length} procesadas...${eta}`);
-				return result;
-			}),
-		),
-	)).filter((r): r is ImageResult => r !== null);
+	const results = (
+		await Promise.all(
+			files.map((file) =>
+				limit(async () => {
+					const result = await processImage(
+						file,
+						existingPhotos,
+						oldCdnBase,
+						oldR2Folder,
+					).catch((err: Error) => {
+						const name = path.basename(file);
+						process.stdout.write("\n");
+						console.warn(`⚠️  Error procesando ${name}: ${err.message}`);
+						failed.push(name);
+						return null;
+					});
+					processed++;
+					const elapsed = (Date.now() - startTime) / 1000;
+					const speed = processed / elapsed;
+					const eta =
+						processed < files.length
+							? ` | ${speed.toFixed(1)} foto/s | ETA ~${formatETA((files.length - processed) / speed)}`
+							: "";
+					process.stdout.write(
+						`\r   ${processed}/${files.length} procesadas...${eta}`,
+					);
+					return result;
+				}),
+			),
+		)
+	).filter((r): r is ImageResult => r !== null);
 
 	const drafts = results.map((r) => r.draft);
-	const totalSaved  = results.reduce((sum, r) => sum + r.saved, 0);
+	const totalSaved = results.reduce((sum, r) => sum + r.saved, 0);
 	const totalSkipped = results.filter((r) => r.skipped).length;
 
 	console.log("\n");
@@ -741,7 +818,7 @@ const main = async () => {
 			nav: {}, // se rellena abajo
 			width: draft.width,
 			height: draft.height,
-			sizes: applyCdn(draft.sizes, config.cdnBase, ALBUM),
+			sizes: applyCdn(draft.sizes, config.cdnBase, r2Folder),
 			meta: draft.meta,
 		};
 	});
@@ -796,4 +873,7 @@ const main = async () => {
 	}
 };
 
-main().catch((err: Error) => { console.error(`❌  ${err.message}`); process.exit(1); });
+main().catch((err: Error) => {
+	console.error(`❌  ${err.message}`);
+	process.exit(1);
+});
