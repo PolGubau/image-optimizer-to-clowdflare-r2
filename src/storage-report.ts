@@ -74,4 +74,4 @@ const main = async () => {
 	console.log(`\n  Disponible: ${fmt(FREE_TIER_BYTES - totalBytes)}\n`);
 };
 
-main();
+main().catch((err: Error) => { console.error(`❌  ${err.message}`); process.exit(1); });

@@ -6,7 +6,7 @@
 		"process": "pnpm clear && pnpm process:new",
 		"process:new": "tsx src/process-album.ts",
 		"process:json": "tsx src/process-album.ts",
-		"process-albums": "tsx src/process-all.ts",
+		"process:all": "tsx src/process-all.ts",
 		"export-labels": "tsx src/export-labels.ts",
 		"validate": "tsx src/validate-album.ts",
 		"storage": "tsx src/storage-report.ts",

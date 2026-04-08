@@ -1,3 +1,20 @@
-input
-output
 node_modules
+output
+
+# Fotos originales — ignorar por tamaño, pero mantener config y labels
+input/**/*.jpg
+input/**/*.jpeg
+input/**/*.png
+input/**/*.JPG
+input/**/*.JPEG
+input/**/*.PNG
+input/**/*.heic
+input/**/*.heif
+input/**/*.HEIC
+input/**/*.HEIF
+
+# Mantener versionados:
+# input/config.json
+# input/*/labels.json
+# input/*/cover.txt
+# input/config.example.json

@@ -164,9 +164,9 @@ const toOrientation = (w: number, h: number): Orientation => {
 };
 
 /** Genera un BlurHash de 4×3 componentes desde un thumbnail 32px. */
-const getBlurHash = async (file: string): Promise<string | null> => {
+const getBlurHash = async (input: Buffer | string): Promise<string | null> => {
 	try {
-		const { data, info } = await sharp(file)
+		const { data, info } = await sharp(input)
 			.resize(32, 32, { fit: "inside" })
 			.ensureAlpha()
 			.raw()
@@ -268,9 +268,9 @@ const readCover = async (album: string): Promise<string | null> => {
 };
 
 /** Color dominante de la foto para fondos y texto accesible. */
-const getPalette = async (file: string): Promise<Palette> => {
+const getPalette = async (input: Buffer | string): Promise<Palette> => {
 	try {
-		const { data } = await sharp(file)
+		const { data } = await sharp(input)
 			.resize(1, 1)
 			.removeAlpha()
 			.raw()
@@ -410,26 +410,28 @@ const updateIndex = async (summary: AlbumSummary): Promise<void> => {
 
 // ── Core ──────────────────────────────────────────────────────────────────────
 
-const processImage = async (
-	file: string,
-	stats: { saved: number; skipped: number },
-): Promise<PhotoDraft | null> => {
-	const filename = path.basename(file, path.extname(file));
-	const originalStat = await fs.stat(file);
+type ImageResult = { draft: PhotoDraft; saved: number; skipped: boolean };
 
-	// Dimensiones originales primero — para saltar tamaños redundantes
-	const sharpMeta = await sharp(file).metadata();
+const processImage = async (file: string): Promise<ImageResult> => {
+	const filename = path.basename(file, path.extname(file));
+
+	// Leer a buffer una sola vez — evita 5-6 lecturas de disco por imagen
+	const inputBuffer = await fs.readFile(file);
+	const originalSize = inputBuffer.length;
+
+	// Dimensiones originales — para saltar tamaños redundantes
+	const sharpMeta = await sharp(inputBuffer).metadata();
 	const w = sharpMeta.width ?? 0;
 	const h = sharpMeta.height ?? 0;
-	const originalWidth = w;
 
 	let outputBytes = 0;
+	let newSizesGenerated = 0;
 	const sizes = {} as Record<SizeSuffix, string>;
 	let lastSuffix: SizeSuffix = "thumb";
 
 	for (const { suffix, width, quality } of SIZES) {
 		// Original más pequeño que el target → reutilizar el tamaño anterior
-		if (originalWidth < width) {
+		if (w < width) {
 			sizes[suffix] = sizes[lastSuffix];
 			continue;
 		}
@@ -438,41 +440,40 @@ const processImage = async (
 		sizes[suffix] = `${filename}_${suffix}.avif`;
 		lastSuffix = suffix;
 
-		const isForced = FORCE_FILE === filename;
-		if (!isForced && await exists(outPath)) {
-			const s = await fs.stat(outPath);
-			outputBytes += s.size;
-			stats.skipped++;
+		if (FORCE_FILE !== filename && await exists(outPath)) {
+			outputBytes += (await fs.stat(outPath)).size;
 			continue;
 		}
 
-		const info = await sharp(file)
+		const info = await sharp(inputBuffer)
 			.rotate()
 			.resize({ width, withoutEnlargement: true })
 			.avif({ quality, effort: 5 })
 			.toFile(outPath);
 
 		outputBytes += info.size;
+		newSizesGenerated++;
 	}
 
 	const [photoMeta, blurHash, palette] = await Promise.all([
-		extractMeta(file),
-		getBlurHash(file),
-		getPalette(file),
+		extractMeta(file),          // exifr necesita la ruta, no el buffer
+		getBlurHash(inputBuffer),
+		getPalette(inputBuffer),
 	]);
 
-	stats.saved += originalStat.size - outputBytes;
-
 	return {
-		filename,
-		label: undefined,
-		orientation: toOrientation(w, h),
-		blurHash,
-		palette,
-		width: w,
-		height: h,
-		sizes,
-		meta: photoMeta,
+		draft: {
+			filename,
+			orientation: toOrientation(w, h),
+			blurHash,
+			palette,
+			width: w,
+			height: h,
+			sizes,
+			meta: photoMeta,
+		},
+		saved: originalSize - outputBytes,
+		skipped: newSizesGenerated === 0,
 	};
 };
 
@@ -573,23 +574,25 @@ const main = async () => {
 	console.log();
 
 	const limit = pLimit(CONCURRENCY);
-	const stats = { saved: 0, skipped: 0 };
-	const drafts: PhotoDraft[] = [];
 	let processed = 0;
 
-	await Promise.all(
+	const results = (await Promise.all(
 		files.map((file) =>
 			limit(async () => {
-				const draft = await processImage(file, stats).catch((err) => {
+				const result = await processImage(file).catch((err: Error) => {
 					console.warn(`⚠️  Error procesando ${file}: ${err.message}`);
 					return null;
 				});
-				if (draft) drafts.push(draft);
 				processed++;
 				process.stdout.write(`\r   ${processed}/${files.length} procesadas...`);
+				return result;
 			}),
 		),
-	);
+	)).filter((r): r is ImageResult => r !== null);
+
+	const drafts = results.map((r) => r.draft);
+	const totalSaved  = results.reduce((sum, r) => sum + r.saved, 0);
+	const totalSkipped = results.filter((r) => r.skipped).length;
 
 	console.log("\n");
 
@@ -678,8 +681,8 @@ const main = async () => {
 
 	console.log(`✅  album.json generado → ${jsonPath}`);
 	console.log(`🗂️  output/index.json actualizado`);
-	console.log(`📦  Espacio ahorrado:  ~${bytesToKB(stats.saved)} KB`);
-	console.log(`⏭️   Archivos saltados: ${stats.skipped} (ya existían)`);
+	console.log(`📦  Espacio ahorrado:  ~${bytesToKB(totalSaved)} KB`);
+	console.log(`⏭️   Fotos saltadas: ${totalSkipped} (ya procesadas)`);
 };
 
-main();
+main().catch((err: Error) => { console.error(`❌  ${err.message}`); process.exit(1); });

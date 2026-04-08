@@ -2,9 +2,9 @@
  * process-all.ts
  *
  * Procesa todos los álbumes encontrados en input/ de forma secuencial.
- * Equivale a ejecutar `pnpm process <album>` por cada carpeta.
+ * Equivale a ejecutar `pnpm process:new <album>` por cada carpeta.
  *
- * Uso: pnpm process-albums
+ * Uso: pnpm process:all
  */
 
 import { readdir } from "fs/promises";
@@ -51,4 +51,4 @@ const main = async () => {
 	}
 };
 
-main();
+main().catch((err: Error) => { console.error(`❌  ${err.message}`); process.exit(1); });

@@ -59,7 +59,7 @@ const main = async () => {
 	console.log(`   ✓ Manuales existentes:     ${manual}`);
 	console.log(`   ✓ Total en archivo:        ${total}`);
 	console.log(`\nEdita ${labelsPath} y vuelve a ejecutar:`);
-	console.log(`   pnpm process:new ${ALBUM}\n`);
+	console.log(`   pnpm process:json ${ALBUM} --json-only\n`);
 };
 
-main();
+main().catch((err: Error) => { console.error(`❌  ${err.message}`); process.exit(1); });
