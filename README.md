@@ -16,18 +16,21 @@ For each album in `input/<album>/`:
 
 ```
 input/
+  config.json               # global config: { "cdnBase": "https://pub-xxx.r2.dev" }
+  config.example.json       # template — copy to config.json and fill in your R2 URL
   <album>/
     *.jpg / *.heic          # source photos
     labels.json             # optional: manual labels { "IMG_xxx": "Custom label" }
     cover.txt               # optional: filename (no ext) of the cover photo
-output/
+output/                     # deploy this entire folder to R2
+  config.json               # generated from input/config.json — read by frontend
   index.json                # list of all albums (AlbumSummary[])
   <album>/
     album.json              # full album data (Album type)
     geo-cache.json          # geocoding cache (generated, keyed by "lat,lng")
-    *_thumb.avif
-    *_medium.avif
-    *_large.avif
+    *_thumb.avif            # 400px / q55
+    *_medium.avif           # 900px / q70
+    *_large.avif            # 1800px / q80
 src/
   types.ts                  # shared types + helpers — copy to your frontend
   process-album.ts          # core: encode + metadata + geocoding
@@ -111,19 +114,89 @@ type Photo = {
 
 ## Frontend integration
 
-Copy `src/types.ts` to your project — no extra dependencies needed:
+### Setup
+
+1. Copy `input/config.example.json` → `input/config.json` and fill in your R2 public URL
+2. Copy `src/types.ts` to your frontend project — zero dependencies
+
+```json
+// input/config.json
+{ "cdnBase": "https://pub-xxxxxxxx.r2.dev" }
+```
+
+### React
+
+```tsx
+import album from './output/granada/album.json'
+import { getImgProps } from './types'
+
+export function PhotoGrid() {
+  return album.photos.map(photo => (
+    <img key={photo.id} {...getImgProps(photo)} />
+  ))
+}
+```
+
+`getImgProps` returns `src`, `srcSet`, `sizes`, `width`, `height`, `alt` and a `style` with `aspectRatio`, `backgroundColor` (palette) and `color` (accessible text) — ready to spread. URLs are already absolute.
+
+### Astro
+
+```astro
+---
+// src/pages/[album]/index.astro
+const CDN = import.meta.env.PUBLIC_CDN_BASE  // set in .env
+
+export async function getStaticPaths() {
+  const index = await fetch(`${CDN}/index.json`).then(r => r.json())
+  return index.map(a => ({ params: { album: a.id }, props: { summary: a } }))
+}
+
+const { summary } = Astro.props
+const album = await fetch(`${CDN}/${summary.id}/album.json`).then(r => r.json())
+---
+
+{album.photos.map(photo => (
+  <img {...getImgProps(photo)} />
+))}
+```
+
+```
+# .env
+PUBLIC_CDN_BASE=https://pub-xxxxxxxx.r2.dev
+```
+
+### Astro content collections (local JSON, static build)
+
+If you copy `output/` into your Astro project's `src/content/`:
 
 ```ts
-import { buildSrcset, getAspectRatio, getTextColor } from './types'
+// src/content/config.ts
+import { defineCollection } from 'astro:content'
+import { glob } from 'astro/loaders'
 
-// srcset string ready for <img srcset="...">
+export const collections = {
+  albums: defineCollection({ loader: glob({ pattern: '*/album.json', base: './src/content/albums' }) })
+}
+```
+
+### Helpers
+
+```ts
+import { buildSrcset, getSizesAttr, getTextColor, getAspectRatio } from './types'
+
+// sizes already have full URLs — use directly
+photo.sizes.large   // "https://pub-xxx.r2.dev/granada/IMG_xxx_large.avif"
+photo.sizes.thumb   // "https://pub-xxx.r2.dev/granada/IMG_xxx_thumb.avif"
+
 buildSrcset(photo.sizes)
+// → "https://.../thumb.avif 400w, https://.../medium.avif 900w, ..."
 
-// aspect ratio for CSS aspect-ratio
-getAspectRatio(photo)   // e.g. 0.45 for portrait
+getSizesAttr(photo.orientation)
+// portrait  → "(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 400px"
+// landscape → "(max-width: 640px) 100vw, (max-width: 1024px) 80vw, 1200px"
 
-// accessible text color over palette background
 getTextColor(photo.palette.bg)  // "#000000" | "#ffffff"
+getAspectRatio(photo)           // 0.45 for portrait
 ```
 
 ## Key implementation notes

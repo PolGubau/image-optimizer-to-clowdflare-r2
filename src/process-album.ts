@@ -195,6 +195,41 @@ const readLabels = async (album: string): Promise<Record<string, string>> => {
 // Formato: { "37.175053,-3.599189": "Sagrario, Granada" }
 const geoCachePath = (album: string) => `./output/${album}/geo-cache.json`;
 
+// ── Config global ──────────────────────────────────────────────────────────────
+
+const readConfig = async (): Promise<{ cdnBase: string }> => {
+	try {
+		const raw = await fs.readFile("./input/config.json", "utf8");
+		return JSON.parse(raw) as { cdnBase: string };
+	} catch {
+		return { cdnBase: "" };
+	}
+};
+
+/**
+ * Añade el cdnBase a los filenames de sizes para que el JSON tenga URLs absolutas.
+ * Si cdnBase está vacío devuelve los filenames sin modificar (desarrollo local).
+ */
+const applyCdn = (
+	sizes: Record<SizeSuffix, string>,
+	cdnBase: string,
+	album: string,
+): Record<SizeSuffix, string> => {
+	if (!cdnBase) return sizes;
+	return Object.fromEntries(
+		Object.entries(sizes).map(([k, v]) => [k, `${cdnBase}/${album}/${v}`]),
+	) as Record<SizeSuffix, string>;
+};
+
+/**
+ * Elimina el prefijo cdnBase de una URL para recuperar el filename original.
+ * Necesario en --json-only para re-aplicar un cdnBase distinto.
+ */
+const stripCdn = (url: string, cdnBase: string, album: string): string => {
+	const prefix = `${cdnBase}/${album}/`;
+	return cdnBase && url.startsWith(prefix) ? url.slice(prefix.length) : url;
+};
+
 const readGeoCache = async (album: string): Promise<Record<string, string>> => {
 	try {
 		const raw = await fs.readFile(geoCachePath(album), "utf8");
@@ -449,17 +484,29 @@ const rebuildJsonOnly = async () => {
 		process.exit(1);
 	}
 
-	const [labels, geoCache, coverFilename] = await Promise.all([
+	// Leer config viejo ANTES de sobrescribirlo — necesario para hacer strip+reapply
+	let oldConfig: { cdnBase: string } = { cdnBase: "" };
+	try { oldConfig = JSON.parse(await fs.readFile("./output/config.json", "utf8")); } catch { /* primera vez */ }
+
+	const [labels, geoCache, coverFilename, config] = await Promise.all([
 		readLabels(ALBUM),
 		readGeoCache(ALBUM),
 		readCover(ALBUM),
+		readConfig(),
 	]);
+
+	await fs.writeFile("./output/config.json", toJSON(config));
 
 	const photos: Photo[] = existing.photos.map((photo) => {
 		const gps = photo.meta.gps;
 		const autoLabel = gps ? (geoCache[geoKey(gps.lat, gps.lng)] ?? null) : null;
+		// Strip cdnBase viejo → aplica el nuevo (soporta cambio de dominio sin reencoder)
+		const rawSizes = Object.fromEntries(
+			Object.entries(photo.sizes).map(([k, v]) => [k, stripCdn(v, oldConfig.cdnBase, ALBUM)]),
+		) as Record<SizeSuffix, string>;
 		return {
 			...photo,
+			sizes: applyCdn(rawSizes, config.cdnBase, ALBUM),
 			label: labels[photo.filename] ?? autoLabel ?? photo.label,
 			nav: {}, // se rellena abajo
 		};
@@ -498,12 +545,15 @@ const main = async () => {
 
 	await fs.mkdir(OUTPUT_DIR, { recursive: true });
 
-	const [files, labels, geoCache, coverFilename] = await Promise.all([
+	const [files, labels, geoCache, coverFilename, config] = await Promise.all([
 		glob(`${INPUT_DIR}/**/*.{jpg,jpeg,png,heic,heif,JPG,JPEG,PNG,HEIC,HEIF}`),
 		readLabels(ALBUM),
 		readGeoCache(ALBUM),
 		readCover(ALBUM),
+		readConfig(),
 	]);
+
+	await fs.writeFile("./output/config.json", toJSON(config));
 
 	if (files.length === 0) {
 		console.error(`❌  No se encontraron imágenes en ${INPUT_DIR}`);
@@ -580,7 +630,7 @@ const main = async () => {
 			nav: {}, // se rellena abajo
 			width: draft.width,
 			height: draft.height,
-			sizes: draft.sizes,
+			sizes: applyCdn(draft.sizes, config.cdnBase, ALBUM),
 			meta: draft.meta,
 		};
 	});

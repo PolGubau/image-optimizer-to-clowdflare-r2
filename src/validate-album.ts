@@ -44,7 +44,9 @@ const main = async () => {
 		for (const sizePath of Object.values(photo.sizes)) {
 			if (checkedPaths.has(sizePath)) continue; // tamaños reutilizados (foto pequeña)
 			checkedPaths.add(sizePath);
-			const fullPath = path.join(OUTPUT_DIR, path.basename(sizePath));
+			// sizePath puede ser URL absoluta o filename — extraer siempre el último segmento
+			const filename = sizePath.split("/").pop()!;
+			const fullPath = path.join(OUTPUT_DIR, filename);
 			try {
 				await fs.access(fullPath);
 			} catch {

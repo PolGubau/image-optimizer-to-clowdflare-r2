@@ -76,17 +76,32 @@ export type AlbumSummary = {
 	coverBlurHash: string | null;
 };
 
+/** Config global del proyecto. Leer desde output/config.json en el frontend. */
+export type Config = {
+	cdnBase: string; // "https://pub-xxx.r2.dev" — sin trailing slash
+};
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-const SIZES: Record<SizeSuffix, number> = { thumb: 400, medium: 900, large: 1800 };
+const SIZE_WIDTHS: Record<SizeSuffix, number> = { thumb: 400, medium: 900, large: 1800 };
 
-/** Genera el atributo srcset listo para <img srcset="...">. */
+/**
+ * Genera el atributo srcset listo para <img srcset="...">.
+ * Las URLs en sizes ya son absolutas si se configuró cdnBase en input/config.json.
+ */
 export const buildSrcset = (sizes: Record<SizeSuffix, string>): string => {
 	const seen = new Set<string>();
 	return (["thumb", "medium", "large"] as SizeSuffix[])
 		.filter((s) => !seen.has(sizes[s]) && seen.add(sizes[s]))
-		.map((s) => `${sizes[s]} ${SIZES[s]}w`)
+		.map((s) => `${sizes[s]} ${SIZE_WIDTHS[s]}w`)
 		.join(", ");
+};
+
+/** Atributo HTML sizes recomendado según orientación — optimiza el browser resource selection. */
+export const getSizesAttr = (orientation: Orientation): string => {
+	if (orientation === "portrait")  return "(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 400px";
+	if (orientation === "landscape") return "(max-width: 640px) 100vw, (max-width: 1024px) 80vw, 1200px";
+	return "(max-width: 640px) 100vw, 600px";
 };
 
 /** Ratio de aspecto de la foto. */
@@ -100,3 +115,34 @@ export const getTextColor = (bg: string): "#000000" | "#ffffff" => {
 	const b = parseInt(bg.slice(5, 7), 16);
 	return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.5 ? "#000000" : "#ffffff";
 };
+
+/**
+ * Devuelve todos los props necesarios para un <img> en React o Astro.
+ * Las URLs en photo.sizes ya son absolutas — no hace falta pasar la base.
+ *
+ * @example
+ * <img {...getImgProps(photo)} />
+ */
+export const getImgProps = (
+	photo: Photo,
+): {
+	src: string;
+	srcSet: string;
+	sizes: string;
+	width: number;
+	height: number;
+	alt: string;
+	style: { aspectRatio: string; backgroundColor: string; color: string };
+} => ({
+	src:    photo.sizes.large,
+	srcSet: buildSrcset(photo.sizes),
+	sizes:  getSizesAttr(photo.orientation),
+	width:  photo.width,
+	height: photo.height,
+	alt:    photo.label ?? "",
+	style: {
+		aspectRatio:     `${photo.width} / ${photo.height}`,
+		backgroundColor: photo.palette.bg,
+		color:           getTextColor(photo.palette.bg),
+	},
+});
