@@ -24,6 +24,7 @@
  *   IMG_20260404_142332   (filename sin extensión)
  */
 
+import os from "os";
 import path from "path";
 import exifr from "exifr";
 import fs from "fs/promises";
@@ -56,12 +57,13 @@ const FORCE_FILE = _positional[1] ?? null; // fuerza reprocesar un archivo concr
 const JSON_ONLY  = _flags.has("--json-only"); // solo regenera el JSON, no toca imágenes
 const INPUT_DIR = `./input/${ALBUM}`;
 const OUTPUT_DIR = `./output/${ALBUM}`;
-const CONCURRENCY = 4;
+// Usar todos los cores menos uno para no bloquear el sistema durante el proceso
+const CONCURRENCY = Math.max(1, os.cpus().length - 1);
 
 const SIZES = [
-	{ suffix: "thumb",  width: 400,  quality: 55 }, // grids / thumbnails — nadie las mira en detalle
-	{ suffix: "medium", width: 900,  quality: 70 }, // mobile / lightbox preview
-	{ suffix: "large",  width: 1800, quality: 80 }, // desktop full-view — aquí importa la calidad
+	{ suffix: "thumb",  width: 400,  quality: 55, effort: 2 }, // thumbnails — mínimo esfuerzo, se ven en grid
+	{ suffix: "medium", width: 900,  quality: 70, effort: 3 }, // mobile / lightbox preview
+	{ suffix: "large",  width: 1800, quality: 80, effort: 4 }, // desktop — calidad visible, effort razonable
 ] as const;
 
 /** Photo sin campos finales — se asignan en main tras ordenar */
@@ -238,7 +240,18 @@ const stripCdn = (url: string, cdnBase: string, album: string): string => {
 const readGeoCache = async (album: string): Promise<Record<string, string>> => {
 	try {
 		const raw = await fs.readFile(geoCachePath(album), "utf8");
-		return JSON.parse(raw) as Record<string, string>;
+		const cache = JSON.parse(raw) as Record<string, string>;
+		// Migrar claves de precisión total → 3 decimales (~110m grid)
+		// Las entradas antiguas se consolidan automáticamente
+		const migrated: Record<string, string> = {};
+		for (const [key, value] of Object.entries(cache)) {
+			const [lat, lng] = key.split(",").map(Number);
+			if (!isNaN(lat) && !isNaN(lng)) {
+				const rounded = geoKey(lat, lng);
+				migrated[rounded] ??= value;
+			}
+		}
+		return migrated;
 	} catch {
 		return {};
 	}
@@ -251,7 +264,8 @@ const saveGeoCache = async (
 	await fs.writeFile(geoCachePath(album), toJSON(cache));
 };
 
-const geoKey = (lat: number, lng: number) => `${lat},${lng}`;
+// 3 decimales = ~110m de precisión — suficiente para geocoding, reduce API calls
+const geoKey = (lat: number, lng: number) => `${lat.toFixed(3)},${lng.toFixed(3)}`;
 
 /**
  * Lee input/<album>/cover.txt si existe.
@@ -412,8 +426,36 @@ const updateIndex = async (summary: AlbumSummary): Promise<void> => {
 
 type ImageResult = { draft: PhotoDraft; saved: number; skipped: boolean };
 
-const processImage = async (file: string): Promise<ImageResult> => {
+const processImage = async (
+	file: string,
+	existingPhotos: Map<string, Photo>,
+	oldCdnBase: string,
+): Promise<ImageResult> => {
 	const filename = path.basename(file, path.extname(file));
+
+	// Early exit: si el thumb ya existe y tenemos datos en caché,
+	// reutilizamos todo sin leer el buffer ni recomputar EXIF/blurHash/palette
+	const thumbPath = path.join(OUTPUT_DIR, `${filename}_thumb.avif`);
+	const cached = existingPhotos.get(filename);
+	if (FORCE_FILE !== filename && cached && await exists(thumbPath)) {
+		const rawSizes = Object.fromEntries(
+			Object.entries(cached.sizes).map(([k, v]) => [k, stripCdn(v, oldCdnBase, ALBUM)]),
+		) as Record<SizeSuffix, string>;
+		return {
+			draft: {
+				filename: cached.filename,
+				orientation: cached.orientation,
+				blurHash: cached.blurHash,
+				palette: cached.palette,
+				width: cached.width,
+				height: cached.height,
+				sizes: rawSizes,
+				meta: cached.meta,
+			},
+			saved: 0,
+			skipped: true,
+		};
+	}
 
 	// Leer a buffer una sola vez — evita 5-6 lecturas de disco por imagen
 	const inputBuffer = await fs.readFile(file);
@@ -429,7 +471,7 @@ const processImage = async (file: string): Promise<ImageResult> => {
 	const sizes = {} as Record<SizeSuffix, string>;
 	let lastSuffix: SizeSuffix = "thumb";
 
-	for (const { suffix, width, quality } of SIZES) {
+	for (const { suffix, width, quality, effort } of SIZES) {
 		// Original más pequeño que el target → reutilizar el tamaño anterior
 		if (w < width) {
 			sizes[suffix] = sizes[lastSuffix];
@@ -448,7 +490,7 @@ const processImage = async (file: string): Promise<ImageResult> => {
 		const info = await sharp(inputBuffer)
 			.rotate()
 			.resize({ width, withoutEnlargement: true })
-			.avif({ quality, effort: 5 })
+			.avif({ quality, effort })
 			.toFile(outPath);
 
 		outputBytes += info.size;
@@ -559,6 +601,23 @@ const main = async () => {
 		readConfig(),
 	]);
 
+	// Leer config y album.json existentes ANTES de sobrescribirlos
+	// — necesario para early exit y strip+reapply de CDN
+	let oldCdnBase = "";
+	let existingPhotos = new Map<string, Photo>();
+	try {
+		const [oldConfigRaw, oldAlbumRaw] = await Promise.allSettled([
+			fs.readFile("./output/config.json", "utf8"),
+			fs.readFile(path.join(OUTPUT_DIR, "album.json"), "utf8"),
+		]);
+		if (oldConfigRaw.status === "fulfilled")
+			oldCdnBase = (JSON.parse(oldConfigRaw.value) as { cdnBase: string }).cdnBase;
+		if (oldAlbumRaw.status === "fulfilled") {
+			const oldAlbum = JSON.parse(oldAlbumRaw.value) as Album;
+			existingPhotos = new Map(oldAlbum.photos.map((p) => [p.filename, p]));
+		}
+	} catch { /* primera pasada, no hay datos previos */ }
+
 	await fs.writeFile("./output/config.json", toJSON(config));
 
 	if (files.length === 0) {
@@ -579,7 +638,7 @@ const main = async () => {
 	const results = (await Promise.all(
 		files.map((file) =>
 			limit(async () => {
-				const result = await processImage(file).catch((err: Error) => {
+				const result = await processImage(file, existingPhotos, oldCdnBase).catch((err: Error) => {
 					console.warn(`⚠️  Error procesando ${file}: ${err.message}`);
 					return null;
 				});
