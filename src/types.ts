@@ -21,7 +21,7 @@ export type Exposure = {
 };
 
 export type PhotoMeta = {
-	takenAt: string | null;
+	takenAt?: string;
 	gps?: Gps;
 	camera?: Camera;
 	lens?: string;
@@ -46,7 +46,7 @@ export type Photo = {
 	filename: string;    // IMG_20260404_095723
 	label?: string;
 	orientation: Orientation;
-	blurHash: string | null;
+	blurHash?: string;
 	palette: Palette;
 	nav: PhotoNav;
 	width: number;
@@ -59,9 +59,9 @@ export type Album = {
 	id: string;
 	title: string;
 	count: number;
-	duration: string | null;
+	duration?: string;
 	cover: string;
-	coverBlurHash: string | null;
+	coverBlurHash?: string;
 	photos: Photo[];
 };
 
@@ -70,10 +70,10 @@ export type AlbumSummary = {
 	id: string;
 	title: string;
 	count: number;
-	duration: string | null;
+	duration?: string;
 	cover: string;
 	coverThumb: string;
-	coverBlurHash: string | null;
+	coverBlurHash?: string;
 };
 
 /** Config global del proyecto. Leer desde output/config.json en el frontend. */
@@ -139,7 +139,7 @@ export const getImgProps = (
 	sizes:  getSizesAttr(photo.orientation),
 	width:  photo.width,
 	height: photo.height,
-	alt:    photo.label ?? "",
+	alt:    photo.label ?? photo.filename,
 	style: {
 		aspectRatio:     `${photo.width} / ${photo.height}`,
 		backgroundColor: photo.palette.bg,

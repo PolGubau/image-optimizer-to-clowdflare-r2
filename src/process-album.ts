@@ -315,8 +315,8 @@ const getPalette = async (input: Buffer | string): Promise<Palette> => {
 
 
 /** Duración del álbum en lenguaje natural (días calendario, no horas). */
-const albumDuration = (from: string | null, to: string | null): string | null => {
-	if (!from || !to) return null;
+const albumDuration = (from: string | undefined, to: string | undefined): string | undefined => {
+	if (!from || !to) return undefined;
 	const fromDay = from.split("T")[0];
 	const toDay = to.split("T")[0];
 	if (fromDay === toDay) return "1 día";
@@ -367,7 +367,7 @@ const extractMeta = async (buffer: Buffer): Promise<PhotoMeta> => {
 		? tzOffset
 			? `${formatLocalDate(exifDate)}${tzOffset}`   // "2026-04-04T09:57:23+02:00"
 			: formatLocalDate(exifDate)                    // "2026-04-04T09:57:23"
-		: null;
+		: undefined;
 
 	// GPS — exifr.gps() ya devuelve decimales ─────────────────────────────────
 	let gps: Gps | undefined;
@@ -526,7 +526,7 @@ const processImage = async (
 		draft: {
 			filename,
 			orientation: toOrientation(w, h),
-			blurHash,
+			blurHash: blurHash ?? undefined,
 			palette,
 			width: w,
 			height: h,
@@ -566,7 +566,7 @@ const rebuildJsonOnly = async () => {
 
 	const photos: Photo[] = existing.photos.map((photo) => {
 		const gps = photo.meta.gps;
-		const autoLabel = gps ? (geoCache[geoKey(gps.lat, gps.lng)] ?? null) : null;
+		const autoLabel = gps ? geoCache[geoKey(gps.lat, gps.lng)] : undefined;
 		// Strip cdnBase viejo → aplica el nuevo (soporta cambio de dominio sin reencoder)
 		const rawSizes = Object.fromEntries(
 			Object.entries(photo.sizes).map(([k, v]) => [k, stripCdn(v, oldConfig.cdnBase, ALBUM)]),
@@ -730,7 +730,7 @@ const main = async () => {
 	// Asignar id, label — manual > cache GPS > null
 	const photos: Photo[] = drafts.map((draft, i) => {
 		const gps = draft.meta.gps;
-		const autoLabel = gps ? (geoCache[geoKey(gps.lat, gps.lng)] ?? null) : null;
+		const autoLabel = gps ? geoCache[geoKey(gps.lat, gps.lng)] : undefined;
 		return {
 			id: `${ALBUM}-${String(i + 1).padStart(3, "0")}`,
 			filename: draft.filename,
@@ -756,7 +756,7 @@ const main = async () => {
 
 	const dates = photos
 		.map((p) => p.meta.takenAt)
-		.filter((d): d is string => d !== null)
+		.filter((d): d is string => d !== undefined)
 		.sort();
 
 	const album: Album = {

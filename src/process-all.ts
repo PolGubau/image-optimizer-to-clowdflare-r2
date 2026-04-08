@@ -32,7 +32,7 @@ const main = async () => {
 	for (const album of entries) {
 		console.log("─".repeat(50));
 		const result = spawnSync(
-			"npx", ["tsx", "src/process-album.ts", album],
+			"pnpm", ["exec", "tsx", "src/process-album.ts", album],
 			{ stdio: "inherit", shell: true },
 		);
 		if (result.status !== 0) {
