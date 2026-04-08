@@ -11,7 +11,7 @@
  *   - IDs limpios y cronológicos: granada-001, granada-002…
  *   - EXIF eliminado de las imágenes de salida (privacidad)
  *   - Procesado incremental (salta archivos ya generados)
- *   - JSON con rutas relativas (tú pones el base URL en tu web)
+ *   - URLs absolutas en el JSON si se configura input/config.json
  *
  * Uso:
  *   tsx src/process-album.ts <album>
@@ -31,24 +31,6 @@ import { glob } from "glob";
 import { encode as blurhashEncode } from "blurhash";
 import pLimit from "p-limit";
 import sharp from "sharp";
-
-// ── Config ────────────────────────────────────────────────────────────────────
-
-const ALBUM = process.argv[2] ?? "granada";
-const FORCE_FILE = process.argv[3] ?? null; // fuerza reprocesar un archivo concreto
-const JSON_ONLY = process.argv.includes("--json-only"); // solo regenera el JSON, no toca imágenes
-const INPUT_DIR = `./input/${ALBUM}`;
-const OUTPUT_DIR = `./output/${ALBUM}`;
-const CONCURRENCY = 4;
-
-const SIZES = [
-	{ suffix: "thumb",  width: 400,  quality: 55 }, // grids / thumbnails — nadie las mira en detalle
-	{ suffix: "medium", width: 900,  quality: 70 }, // mobile / lightbox preview
-	{ suffix: "large",  width: 1800, quality: 80 }, // desktop full-view — aquí importa la calidad
-] as const;
-
-// ── Types ─────────────────────────────────────────────────────────────────────
-
 import type {
 	SizeSuffix,
 	Gps,
@@ -61,6 +43,26 @@ import type {
 	Album,
 	AlbumSummary,
 } from "./types.js";
+
+// ── Config ────────────────────────────────────────────────────────────────────
+
+// Separar flags (--xxx) de args posicionales para evitar que --json-only
+// acabe asignado a FORCE_FILE si el orden de args cambia.
+const _positional = process.argv.slice(2).filter((a) => !a.startsWith("--"));
+const _flags = new Set(process.argv.slice(2).filter((a) => a.startsWith("--")));
+
+const ALBUM      = _positional[0] ?? "granada";
+const FORCE_FILE = _positional[1] ?? null; // fuerza reprocesar un archivo concreto
+const JSON_ONLY  = _flags.has("--json-only"); // solo regenera el JSON, no toca imágenes
+const INPUT_DIR = `./input/${ALBUM}`;
+const OUTPUT_DIR = `./output/${ALBUM}`;
+const CONCURRENCY = 4;
+
+const SIZES = [
+	{ suffix: "thumb",  width: 400,  quality: 55 }, // grids / thumbnails — nadie las mira en detalle
+	{ suffix: "medium", width: 900,  quality: 70 }, // mobile / lightbox preview
+	{ suffix: "large",  width: 1800, quality: 80 }, // desktop full-view — aquí importa la calidad
+] as const;
 
 /** Photo sin campos finales — se asignan en main tras ordenar */
 type PhotoDraft = Omit<Photo, "id" | "nav">;
@@ -153,8 +155,11 @@ const formatShutter = (seconds: number): string => {
 };
 
 
+// Umbral de 10px: diferencia mínima para no clasificar como "square"
+// fotos que son casi cuadradas por rotación o crop.
+const SQUARE_THRESHOLD = 10;
 const toOrientation = (w: number, h: number): Orientation => {
-	if (Math.abs(w - h) < 10) return "square";
+	if (Math.abs(w - h) < SQUARE_THRESHOLD) return "square";
 	return w > h ? "landscape" : "portrait";
 };
 
@@ -243,7 +248,7 @@ const saveGeoCache = async (
 	album: string,
 	cache: Record<string, string>,
 ): Promise<void> => {
-	await fs.writeFile(geoCachePath(album), JSON.stringify(cache, null, 2));
+	await fs.writeFile(geoCachePath(album), toJSON(cache));
 };
 
 const geoKey = (lat: number, lng: number) => `${lat},${lng}`;
