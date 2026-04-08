@@ -79,6 +79,21 @@ const exists = (p: string) =>
 
 const bytesToKB = (n: number) => (n / 1024).toFixed(1);
 
+/** Formatea milisegundos como "4m 32s" o "45s". */
+const formatDuration = (ms: number): string => {
+	const s = Math.round(ms / 1000);
+	if (s < 60) return `${s}s`;
+	return `${Math.floor(s / 60)}m ${s % 60}s`;
+};
+
+/** Formatea segundos restantes como ETA legible. */
+const formatETA = (seconds: number): string => {
+	if (!isFinite(seconds) || seconds <= 0) return "...";
+	const s = Math.round(seconds);
+	if (s < 60) return `${s}s`;
+	return `${Math.floor(s / 60)}m ${s % 60}s`;
+};
+
 /** Formatea una fecha usando getters locales — preserva la hora del móvil sin asumir UTC. */
 const formatLocalDate = (d: Date): string => {
 	const p = (n: number) => String(n).padStart(2, "0");
@@ -311,11 +326,15 @@ const albumDuration = (from: string | null, to: string | null): string | null =>
 	return `${days} días`;
 };
 
-/** Extrae metadata útil del archivo desde el EXIF nativo. */
-const extractMeta = async (file: string): Promise<PhotoMeta> => {
+/** Extrae metadata útil del archivo desde el EXIF nativo.
+ *  Recibe el buffer ya leído para evitar I/O adicional y para que
+ *  exifr.gps() opere sobre datos en memoria (sin límite de firstChunkSize),
+ *  lo que es necesario para HEIC donde el GPS IFD puede estar >40 KB adentro.
+ */
+const extractMeta = async (buffer: Buffer): Promise<PhotoMeta> => {
 	const [exif, gpsDecimal] = await Promise.all([
 		exifr
-			.parse(file, {
+			.parse(buffer, {
 				pick: [
 					"DateTimeOriginal",
 					"CreateDate",
@@ -333,7 +352,7 @@ const extractMeta = async (file: string): Promise<PhotoMeta> => {
 				],
 			})
 			.catch(() => null) as Promise<Record<string, unknown> | null>,
-		exifr.gps(file).catch(() => null) as Promise<{
+		exifr.gps(buffer).catch(() => null) as Promise<{
 			latitude: number;
 			longitude: number;
 		} | null>,
@@ -498,7 +517,7 @@ const processImage = async (
 	}
 
 	const [photoMeta, blurHash, palette] = await Promise.all([
-		extractMeta(file),          // exifr necesita la ruta, no el buffer
+		extractMeta(inputBuffer),
 		getBlurHash(inputBuffer),
 		getPalette(inputBuffer),
 	]);
@@ -625,6 +644,21 @@ const main = async () => {
 		process.exit(1);
 	}
 
+	// Detectar nombres duplicados (mismo basename, distinta extensión)
+	// — generarían AVIFs idénticos y se sobreescribirían sin aviso
+	const seen = new Set<string>();
+	const dupes = new Set<string>();
+	for (const f of files) {
+		const base = path.basename(f, path.extname(f));
+		if (seen.has(base)) dupes.add(base);
+		else seen.add(base);
+	}
+	if (dupes.size > 0) {
+		console.error(`❌  Nombres de archivo duplicados (causarían AVIFs idénticos):`);
+		for (const d of dupes) console.error(`   • ${d}`);
+		process.exit(1);
+	}
+
 	console.log(`🖼️   ${files.length} imágenes encontradas`);
 	if (Object.keys(labels).length > 0)
 		console.log(`🏷️   ${Object.keys(labels).length} labels cargados`);
@@ -633,17 +667,27 @@ const main = async () => {
 	console.log();
 
 	const limit = pLimit(CONCURRENCY);
+	const failed: string[] = [];
 	let processed = 0;
+	const startTime = Date.now();
 
 	const results = (await Promise.all(
 		files.map((file) =>
 			limit(async () => {
 				const result = await processImage(file, existingPhotos, oldCdnBase).catch((err: Error) => {
-					console.warn(`⚠️  Error procesando ${file}: ${err.message}`);
+					const name = path.basename(file);
+					process.stdout.write("\n");
+					console.warn(`⚠️  Error procesando ${name}: ${err.message}`);
+					failed.push(name);
 					return null;
 				});
 				processed++;
-				process.stdout.write(`\r   ${processed}/${files.length} procesadas...`);
+				const elapsed = (Date.now() - startTime) / 1000;
+				const speed = processed / elapsed;
+				const eta = processed < files.length
+					? ` | ${speed.toFixed(1)} foto/s | ETA ~${formatETA((files.length - processed) / speed)}`
+					: "";
+				process.stdout.write(`\r   ${processed}/${files.length} procesadas...${eta}`);
 				return result;
 			}),
 		),
@@ -738,10 +782,18 @@ const main = async () => {
 		coverBlurHash: cover.blurHash,
 	});
 
+	const totalTime = formatDuration(Date.now() - startTime);
+
 	console.log(`✅  album.json generado → ${jsonPath}`);
 	console.log(`🗂️  output/index.json actualizado`);
 	console.log(`📦  Espacio ahorrado:  ~${bytesToKB(totalSaved)} KB`);
 	console.log(`⏭️   Fotos saltadas: ${totalSkipped} (ya procesadas)`);
+	console.log(`⏱️   Tiempo total: ${totalTime}`);
+
+	if (failed.length > 0) {
+		console.warn(`\n❌  ${failed.length} foto(s) fallaron:`);
+		for (const f of failed) console.warn(`   • ${f}`);
+	}
 };
 
 main().catch((err: Error) => { console.error(`❌  ${err.message}`); process.exit(1); });

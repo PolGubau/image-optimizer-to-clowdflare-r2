@@ -8,6 +8,7 @@
 		"process:json": "tsx src/process-album.ts",
 		"process:all": "tsx src/process-all.ts",
 		"export-labels": "tsx src/export-labels.ts",
+		"export-labels:all": "tsx src/export-labels.ts --all",
 		"validate": "tsx src/validate-album.ts",
 		"storage": "tsx src/storage-report.ts",
 		"clear": "node -e \"require('fs').rmSync('output', { recursive: true, force: true })\"",
